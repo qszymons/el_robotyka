@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>A* — wizualizacja (0 = empty, 5 = wall, 3 = path)</title>
+<style>
+  body { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin: 18px; background:#f7fafc; color:#0f172a; }
+  h1 { margin:0 0 10px 0; font-size:20px; }
+  .controls { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; align-items:center; }
+  button, select, input[type=number] { padding:6px 8px; border-radius:6px; border:1px solid #cbd5e1; background:white; cursor:pointer; }
+  button:active { transform:translateY(1px); }
+  #canvasWrap { display:flex; gap:16px; align-items:flex-start; }
+  canvas { background: white; border:1px solid #cbd5e1; box-shadow: 0 6px 18px rgba(2,6,23,0.06); cursor:crosshair; }
+  .sidebar { width:300px; }
+  .legend { display:grid; gap:8px; margin-top:8px; }
+  .legend-item { display:flex; gap:8px; align-items:center; }
+  .swatch { width:22px; height:22px; border-radius:4px; border:1px solid #94a3b8; }
+  .muted { color:#475569; font-size:13px; }
+  .small { font-size:13px; }
+  textarea { width:100%; height:130px; margin-top:8px; font-family:monospace; }
+  label { font-size:13px; }
+</style>
+</head>
+<body>
+<h1>Wizualizacja A* (4-ruchy) — 0=puste, 5=ściana, 3=ścieżka</h1>
+
+<div class="controls">
+  <label>Rozmiar:
+    <input id="sizeInput" type="number" min="5" max="80" value="20" style="width:70px">
+  </label>
+  <button id="genBtn">Generuj losowo</button>
+  <button id="clearBtn">Wyczyść (same 0)</button>
+  <button id="fillBtn">Wypełnij ścianami</button>
+  <button id="runBtn">Uruchom A*</button>
+  <button id="stepFwd">Krok ➜</button>
+  <button id="stepBack">◂ Krok</button>
+  <button id="playBtn">Play ►</button>
+  <label>Speed:
+    <input id="speed" type="number" min="50" max="2000" value="300" style="width:80px"> ms
+  </label>
+  <button id="exportBtn">Pobierz/wyświetl mapę</button>
+  <button id="resetPathBtn">Usuń ścieżkę (3)</button>
+</div>
+
+<div id="canvasWrap">
+  <canvas id="gridCanvas" width="600" height="600"></canvas>
+
+  <div class="sidebar">
+    <div class="muted small">
+      Kliknij na pole aby zmienić ścianę.<br>
+      Przytrzymaj <b>Shift</b> + klik aby ustawić <b>Start</b>.<br>
+      Przytrzymaj <b>Ctrl</b> / <b>Cmd</b> + klik aby ustawić <b>Goal</b>.<br>
+      Siatka renderowana tak, by (0,0) było lewym-dolnym polem — zgodnie z Twoim C++ (odwrócone Y).
+    </div>
+
+    <div style="margin-top:12px">
+      <div class="legend">
+        <div class="legend-item"><div class="swatch" style="background:#ffffff"></div> Puste (0)</div>
+        <div class="legend-item"><div class="swatch" style="background:#0f172a"></div><div class="muted">Ściana (5)</div></div>
+        <div class="legend-item"><div class="swatch" style="background:#60a5fa"></div> Open set</div>
+        <div class="legend-item"><div class="swatch" style="background:#fca5a5"></div> Closed set</div>
+        <div class="legend-item"><div class="swatch" style="background:#f59e0b"></div> Current node</div>
+        <div class="legend-item"><div class="swatch" style="background:#34d399"></div> Path (3)</div>
+        <div class="legend-item"><div class="swatch" style="background:#a78bfa"></div> Start</div>
+        <div class="legend-item"><div class="swatch" style="background:#fb7185"></div> Goal</div>
+      </div>
+    </div>
+
+    <div style="margin-top:12px">
+      <div class="small"><b>Info:</b></div>
+      <div id="info" class="muted small">Gotowe.</div>
+    </div>
+
+    <div style="margin-top:12px">
+      <label class="small">Tekst mapy (linie od góry do dołu):</label>
+      <textarea id="mapText" readonly></textarea>
+    </div>
+  </div>
+</div>
+
+<script>
+// ----------------------- Konfiguracja i stan -----------------------
+let rows = parseInt(document.getElementById('sizeInput').value,10);
+let cols = rows;
+let cellSize = 600 / cols; // canvas 600x600
+const canvas = document.getElementById('gridCanvas');
+const ctx = canvas.getContext('2d');
+
+let grid = [];
+let start = {x:0, y:0};      // (0,0) lewy-dolny — będziemy mapować to do rysunku
+let goal = {x:cols-1, y:rows-1};
+
+let steps = []; // krokowa historia A*: każdy step ma {current, openSet:Set, closedSet:Set, cameFrom:Map, g:fScores, f:fScores}
+let stepIndex = -1;
+let playing = false;
+let playTimer = null;
+
+// inicjalizacja
+function initGrid(r,c){
+  rows = r; cols = c;
+  cellSize = 600 / cols;
+  canvas.width = 600;
+  canvas.height = 600;
+  grid = Array.from({length:rows}, ()=>Array(cols).fill(0));
+  start = {x:0, y:0};
+  goal = {x:cols-1, y:rows-1};
+  steps = []; stepIndex = -1; playing=false; clearInterval(playTimer);
+  updateInfo("Siatka zainicjalizowana: " + cols + "x" + rows);
+  render();
+  updateMapText();
+}
+initGrid(rows, cols);
+
+// ----------------------- Rysowanie -----------------------
+function drawCell(x,y,style){
+  // y — w modelu 0 u dołu -> musimy przełożyć na canvas (0 u góry)
+  const drawY = (rows - 1 - y);
+  const px = x * cellSize;
+  const py = drawY * cellSize;
+  ctx.fillStyle = style;
+  ctx.fillRect(px+1, py+1, cellSize-2, cellSize-2);
+}
+
+function render(){
+  // tło
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  // siatka
+  ctx.fillStyle = "#e2e8f0";
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  // najpierw pola: puste i ściany i ewentualne 3 (ścieżka)
+  for(let y=0;y<rows;y++){
+    for(let x=0;x<cols;x++){
+      const v = grid[y][x];
+      if(v===5){
+        drawCell(x,y,"#0f172a"); // ściana
+      } else if (v===3){
+        drawCell(x,y,"#34d399"); // ścieżka
+      } else {
+        drawCell(x,y,"#ffffff"); // puste
+      }
+    }
+  }
+
+  // jeśli mamy kroki, narysuj open/closed/current
+  if(stepIndex >= 0 && steps[stepIndex]){
+    const st = steps[stepIndex];
+    // open set
+    st.openSet.forEach(s=>{
+      const [x,y] = s.split(',').map(Number);
+      if(!isSame(start,{x,y}) && !isSame(goal,{x,y})) drawCell(x,y,"#60a5fa");
+    });
+    // closed set
+    st.closedSet.forEach(s=>{
+      const [x,y] = s.split(',').map(Number);
+      if(!isSame(start,{x,y}) && !isSame(goal,{x,y})) drawCell(x,y,"#fca5a5");
+    });
+    // current
+    if(st.current){
+      drawCell(st.current.x, st.current.y, "#f59e0b");
+    }
+    // reconstruct partial path if cameFrom leads to current (to visualize progress) - optional
+    if(st.cameFrom && st.current){
+      const p = reconstructFromMap(st.cameFrom, st.current);
+      for(const n of p) if(!isSame(n,start) && !isSame(n,goal)) drawCell(n.x,n.y,"#34d399");
+    }
+  }
+
+  // start and goal overlay
+  drawCell(start.x, start.y, "#a78bfa");
+  drawCell(goal.x, goal.y, "#fb7185");
+
+  // grid lines
+  ctx.strokeStyle = "#e6eef9";
+  ctx.lineWidth = 1;
+  for(let i=0;i<=cols;i++){
+    ctx.beginPath();
+    ctx.moveTo(i*cellSize + 0.5, 0);
+    ctx.lineTo(i*cellSize + 0.5, canvas.height);
+    ctx.stroke();
+  }
+  for(let j=0;j<=rows;j++){
+    ctx.beginPath();
+    ctx.moveTo(0, j*cellSize + 0.5);
+    ctx.lineTo(canvas.width, j*cellSize + 0.5);
+    ctx.stroke();
+  }
+}
+
+function isSame(a,b){ return a.x===b.x && a.y===b.y; }
+
+// ----------------------- Interakcje myszy -----------------------
+canvas.addEventListener('click', (ev)=>{
+  const rect = canvas.getBoundingClientRect();
+  const cx = ev.clientX - rect.left;
+  const cy = ev.clientY - rect.top;
+  const gridX = Math.floor(cx / cellSize);
+  const drawY = Math.floor(cy / cellSize);
+  const gridY = rows - 1 - drawY; // przemapuj z rysunku do modelu
+
+  if(ev.shiftKey){
+    // ustaw start
+    start = {x:gridX, y:gridY};
+    updateInfo("Start ustawiony na: ("+start.x+","+start.y+")");
+    clearSteps();
+    updateMapText();
+    render();
+    return;
+  }
+  if(ev.ctrlKey || ev.metaKey){
+    // ustaw goal
+    goal = {x:gridX, y:gridY};
+    updateInfo("Goal ustawiony na: ("+goal.x+","+goal.y+")");
+    clearSteps();
+    updateMapText();
+    render();
+    return;
+  }
+
+  // toggle wall (5) / empty(0)
+  if(grid[gridY][gridX] === 5) grid[gridY][gridX] = 0;
+  else grid[gridY][gridX] = 5;
+  clearSteps();
+  updateMapText();
+  render();
+});
+
+// ----------------------- Generacja / import / export -----------------------
+document.getElementById('genBtn').addEventListener('click', ()=>{
+  const density = 0.28; // jak dużo ścian
+  for(let y=0;y<rows;y++){
+    for(let x=0;x<cols;x++){
+      grid[y][x] = Math.random() < density ? 5 : 0;
+    }
+  }
+  // upewnij się, że start i goal są puste
+  grid[start.y][start.x] = 0;
+  grid[goal.y][goal.x] = 0;
+  clearSteps();
+  updateInfo("Wygenerowano losową mapę.");
+  updateMapText();
+  render();
+});
+
+document.getElementById('clearBtn').addEventListener('click', ()=>{
+  for(let y=0;y<rows;y++) for(let x=0;x<cols;x++) grid[y][x] = 0;
+  clearSteps();
+  updateInfo("Mapa wyczyszczona.");
+  updateMapText();
+  render();
+});
+
+document.getElementById('fillBtn').addEventListener('click', ()=>{
+  for(let y=0;y<rows;y++) for(let x=0;x<cols;x++) grid[y][x] = 5;
+  // przypadkowo zostaw start i goal jako puste
+  grid[start.y][start.x] = 0;
+  grid[goal.y][goal.x] = 0;
+  clearSteps();
+  updateInfo("Mapa wypełniona ścianami.");
+  updateMapText();
+  render();
+});
+
+document.getElementById('sizeInput').addEventListener('change', (e)=>{
+  const v = parseInt(e.target.value,10);
+  if(isNaN(v) || v < 5 || v > 80) return;
+  initGrid(v,v);
+  updateMapText();
+});
+
+// export / pokaz tekst mapy
+document.getElementById('exportBtn').addEventListener('click', ()=>{
+  updateMapText(true);
+});
+
+// Usuń ścieżkę (wartość 3) z gridu
+document.getElementById('resetPathBtn').addEventListener('click', ()=>{
+  for(let y=0;y<rows;y++) for(let x=0;x<cols;x++) if(grid[y][x]===3) grid[y][x]=0;
+  updateInfo("Usunięto zaznaczoną ścieżkę (3).");
+  updateMapText();
+  render();
+});
+
+function updateMapText(showAlert=false){
+  // zwracamy tekst zgodny z C++ (linia najwyższa pierwsza) — czyli rysunek od góry do dołu
+  let lines = [];
+  for(let ry = rows-1; ry>=0; ry--){
+    let line = "";
+    for(let x=0;x<cols;x++){
+      line += String(grid[ry][x]);
+    }
+    lines.push(line);
+  }
+  document.getElementById('mapText').value = lines.join("\n");
+  if(showAlert) alert("Mapa (format tekstowy) skopiowana do pola poniżej.");
+}
+
+// ----------------------- A* (krok po kroku) -----------------------
+// Heurystyka euklidesowa
+function heuristic(a,b){
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+// funkcja pomocnicza do odtwarzania ścieżki z cameFrom (map string->string)
+function reconstructFromMap(cameFrom, current){
+  const path = [current];
+  let key = current.x + "," + current.y;
+  while(cameFrom.has(key)){
+    const p = cameFrom.get(key).split(',').map(Number);
+    const node = {x:p[0], y:p[1]};
+    path.push(node);
+    key = node.x + "," + node.y;
+  }
+  return path.reverse();
+}
+
+function AStarStepwise(s, g, gridCopy){
+  // Zwraca listę kroków; każdy krok to snapshot: {current, openSet:Set<string>, closedSet:Set<string>, cameFrom:Map<string,string>}
+  const rowsL = gridCopy.length;
+  const colsL = gridCopy[0].length;
+
+  // priority queue prostsza: tablica sortowana
+  function pqPush(arr, item){
+    arr.push(item);
+    arr.sort((a,b)=> a.f - b.f);
+  }
+  function pqPop(arr){
+    return arr.shift();
+  }
+
+  const startKey = s.x + "," + s.y;
+  const goalKey = g.x + "," + g.y;
+
+  const openArr = [];
+  const openSet = new Set();
+  pqPush(openArr, {node:s, f:heuristic(s,g)});
+  openSet.add(startKey);
+
+  const cameFrom = new Map();
+  const gScore = new Map();
+  const fScore = new Map();
+
+  gScore.set(startKey, 0);
+  fScore.set(startKey, heuristic(s,g));
+
+  const closedSet = new Set();
+
+  const directions = [
+    {dx:0, dy:1}, {dx:0, dy:-1}, {dx:-1, dy:0}, {dx:1, dy:0}
+  ];
+
+  const timeline = [];
+
+  while(openArr.length > 0){
+    const item = pqPop(openArr);
+    const current = item.node;
+    const curKey = current.x + "," + current.y;
+    openSet.delete(curKey);
+
+    // snapshot before expanding current
+    timeline.push({
+      current: {...current},
+      openSet: new Set(openSet),
+      closedSet: new Set(closedSet),
+      cameFrom: new Map(cameFrom),
+      gScore: new Map(gScore),
+      fScore: new Map(fScore)
+    });
+
+    if(current.x === g.x && current.y === g.y){
+      // final snapshot - with path visible
+      timeline.push({
+        current: {...current},
+        openSet: new Set(openSet),
+        closedSet: new Set(closedSet),
+        cameFrom: new Map(cameFrom),
+        gScore: new Map(gScore),
+        fScore: new Map(fScore),
+        finished: true
+      });
+      return timeline;
+    }
+
+    closedSet.add(curKey);
+
+    for(const d of directions){
+      const nx = current.x + d.dx;
+      const ny = current.y + d.dy;
+      if(nx < 0 || nx >= colsL || ny < 0 || ny >= rowsL) continue;
+      if(gridCopy[ny][nx] === 5) continue;
+
+      const neighborKey = nx + "," + ny;
+      const tentativeG = (gScore.has(curKey) ? gScore.get(curKey) : Infinity) + 1.0;
+
+      if(!gScore.has(neighborKey) || tentativeG < gScore.get(neighborKey)){
+        cameFrom.set(neighborKey, curKey);
+        gScore.set(neighborKey, tentativeG);
+        const f = tentativeG + heuristic({x:nx,y:ny}, g);
+        fScore.set(neighborKey, f);
+
+        if(!openSet.has(neighborKey) && !closedSet.has(neighborKey)){
+          pqPush(openArr, {node:{x:nx,y:ny}, f});
+          openSet.add(neighborKey);
+        }
+      }
+    }
+  }
+  // brak sciezki — zwróć timeline i oznacz koniec
+  timeline.push({current:null, openSet:new Set(), closedSet:new Set(), cameFrom:new Map(), finished:true, noPath:true});
+  return timeline;
+}
+
+function clearSteps(){ steps = []; stepIndex = -1; playing=false; clearInterval(playTimer); updateInfo("Kroki zresetowane."); }
+
+document.getElementById('runBtn').addEventListener('click', ()=>{
+  // Usuń wcześniejsze oznaczenia ścieżki z gridu (3)
+  for(let y=0;y<rows;y++) for(let x=0;x<cols;x++) if(grid[y][x]===3) grid[y][x]=0;
+  // ensure start/goal are not walls
+  grid[start.y][start.x] = 0;
+  grid[goal.y][goal.x] = 0;
+
+  updateInfo("Uruchamianie A*...");
+  const copy = grid.map(r=>r.slice());
+  steps = AStarStepwise(start, goal, copy);
+  stepIndex = 0;
+  render();
+  updateInfo("A* wykonał " + steps.length + " kroków. Użyj Krok lub Play aby obserwować.");
+});
+
+document.getElementById('stepFwd').addEventListener('click', ()=>{
+  if(steps.length === 0) { updateInfo("Brak kroków. Najpierw kliknij Uruchom A*."); return; }
+  if(stepIndex < steps.length-1) stepIndex++;
+  applyStepVisual(steps[stepIndex]);
+});
+
+document.getElementById('stepBack').addEventListener('click', ()=>{
+  if(steps.length === 0) { updateInfo("Brak kroków. Najpierw kliknij Uruchom A*."); return; }
+  if(stepIndex > 0) stepIndex--;
+  applyStepVisual(steps[stepIndex]);
+});
+
+document.getElementById('playBtn').addEventListener('click', ()=>{
+  if(steps.length === 0) { updateInfo("Brak kroków. Najpierw kliknij Uruchom A*."); return; }
+  playing = !playing;
+  document.getElementById('playBtn').textContent = playing ? "Pause ▮▮" : "Play ►";
+  if(playing){
+    const speed = Math.max(50, parseInt(document.getElementById('speed').value,10));
+    playTimer = setInterval(()=>{
+      if(stepIndex < steps.length - 1){
+        stepIndex++;
+        applyStepVisual(steps[stepIndex]);
+      } else {
+        playing = false; clearInterval(playTimer); document.getElementById('playBtn').textContent = "Play ►";
+        // jeśli zakończył się sukces i mamy cameFrom -> zapisz ścieżkę na gridzie
+        const last = steps[steps.length-1];
+        if(last && last.finished && !last.noPath && last.cameFrom){
+          const p = reconstructFromMap(last.cameFrom, last.current);
+          for(const n of p) grid[n.y][n.x] = 3;
+          updateMapText();
+          render();
+          updateInfo("Znaleziono ścieżkę i oznaczono jako 3 w mapie.");
+        } else {
+          updateInfo("Koniec — brak ścieżki.");
+        }
+      }
+    }, speed);
+  } else {
+    clearInterval(playTimer);
+  }
+});
+
+function applyStepVisual(step){
+  if(!step) return;
+  // rysuj snapshot: step zawiera openSet, closedSet, current, cameFrom
+  render(); // najpierw rysujemy bazę
+  // dodatkowe działania — jeśli finished i success -> pokaż ścieżkę
+  if(step.finished && !step.noPath && step.cameFrom && step.current){
+    const path = reconstructFromMap(step.cameFrom, step.current);
+    for(const n of path) if(!isSame(n,start) && !isSame(n,goal)) drawCell(n.x,n.y,"#34d399");
+    // i zapisz do grid jako 3
+    for(const n of path) grid[n.y][n.x] = 3;
+    updateMapText();
+    updateInfo("Koniec: ścieżka znaleziona. Długość: " + path.length);
+    render();
+    return;
+  }
+  if(step.finished && step.noPath){
+    updateInfo("Koniec: brak ścieżki.");
+    return;
+  }
+
+  // normalny krok: wyświetl open/closed/current — to już robi render() jeśli stepIndex ustawiony,
+  // ale żeby pewnie odświeżyć info:
+  updateInfo(`Krok ${stepIndex+1}/${steps.length} — current: ${step.current ? '('+step.current.x+','+step.current.y+')' : 'brak'}`);
+  // narysuj jeszcze raz aby warstwy nie zaginęły
+  render();
+  // overlay open/closed/current z bieżącego stepu
+  // (render już to robi, bo render sprawdza steps[stepIndex])
+}
+
+// ----------------------- Pomocnicze -----------------------
+function updateInfo(txt){ document.getElementById('info').textContent = txt; }
+
+// na wypadek, że chcesz wywołać odtwarzanie ścieżki poza animacją:
+function finalizeAndMarkPath(){
+  if(steps.length===0) return;
+  const last = steps[steps.length-1];
+  if(last && last.finished && !last.noPath && last.cameFrom){
+    const p = reconstructFromMap(last.cameFrom, last.current);
+    for(const n of p) grid[n.y][n.x] = 3;
+    updateMapText();
+    render();
+    updateInfo("Ścieżka zapisana do mapy jako 3.");
+  }
+}
+
+// ----------------------- Pomniejsze: odpal na starcie ----
+render();
+updateMapText();
+</script>
+</body>
+</html>
